@@ -5,11 +5,6 @@ Description: >-
 
 Parameters:
 
-  SesReplyFromAddress:
-    Description: >-
-      The From: address to use for email replies.
-    Type: String
-    Default: sevice@example.com
   SesDomainName:
     Description: >-
       The verified Domain you will use with SES
@@ -130,7 +125,7 @@ Resources:
         Variables:
           SES_AWS_REGION: !Ref AWS::Region
           SES_S3_BUCKET_NAME: !Ref SesEmailStorageS3Bucket
-          SERVICE_FROM_ADDRESS: !Ref SesReplyFromAddress
+          SERVICE_FROM_ADDRESS: !Sub No Reply <no-reply@${SesDomainName}>
       Code:
         ZipFile: |
           import boto3
@@ -262,30 +257,22 @@ Outputs:
   FinishUpStep2:
     Description: 'Step 2: Activate SES Rule Set'
     Value: !Sub
-    - "Go to Rule Set Homepage, check the Rule Set we just created [${ruleset}], then click the 'Set as Active Rule Set' Button https://${region}.console.aws.amazon.com/ses/home?region=${region}#receipt-rules:_"
-    - {region: !Ref 'AWS::Region', ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]}
+    - "Go to Rule Set Homepage, check the Rule Set we just created [${ruleset}], then click the 'Set as Active Rule Set' Button https://console.aws.amazon.com/ses/home#receipt-rules:_"
+    - {ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]}
 
-  FinishUpStep3:
-    Description: 'Step 3: Verify SES Rule Set & Rule active/enabled'
-    Value: !Sub
-    - "You should now see your Active Rule Set [${ruleset}] with enabled Rule [${rule}], https://${region}.console.aws.amazon.com/ses/home?region=${region}#rule-set:${ruleset}"
-    - {region: !Ref 'AWS::Region', rule: !Ref ImageAnalysisSesReceiverRule, ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]}
-
-  FinishUpStep4Last:
-    Description: 'Step 4 (final): Verify your testing email addresses'
-    Value: !Sub
-    - "If your SES is sandboxed (true if just created), you'll need to verify any addressed SES will be replying to, https://${region}.console.aws.amazon.com/ses/home?region=${region}#verified-senders-email:_"
-    - {region: !Ref 'AWS::Region'}
+  FinishUpStep3Last:
+    Description: 'Step 3 (final): Verify your testing email addresses'
+    Value: If your SES is sandboxed (true if just created), you'll need to verify any addressed SES will be replying to, https://console.aws.amazon.com/ses/home#verified-senders-email:_
 
   TheLambdaLogs:
     Description: 'Here are the Logs for the Lambda function '
     Value: !Sub
-    - "disregard the 'not found...' error, only shown as the logs are initially empty https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}#logEventViewer:group=/aws/lambda/${lambda}"
-    - {region: !Ref 'AWS::Region', lambda: !Ref SesReceivedEmailProcessorLambda}
+    - "disregard the 'not found...' error, only shown as the logs are initially empty https://console.aws.amazon.com/cloudwatch/home#logEventViewer:group=/aws/lambda/${lambda}"
+    - {lambda: !Ref SesReceivedEmailProcessorLambda}
 
   TheLambdaFunction:
     Description: 'Link to the Lambda function'
     Value: !Sub
-    - "The Lambda SES uses to send the img to Rekognition https://${region}.console.aws.amazon.com/lambda/home?region=${region}#/functions/${lambda}?tab=graph"
-    - {region: !Ref 'AWS::Region', lambda: !Ref SesReceivedEmailProcessorLambda}
+    - "The Lambda SES uses to send the img to Rekognition https://console.aws.amazon.com/lambda/home#/functions/${lambda}?tab=graph"
+    - {lambda: !Ref SesReceivedEmailProcessorLambda}
 
