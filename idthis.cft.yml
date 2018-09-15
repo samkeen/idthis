@@ -1,0 +1,291 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Using Lambda, we send an image from an email attachment to the
+  Rekognition service.  Then reply  to the sender with the extracted labels.
+
+Parameters:
+
+  SesReplyFromAddress:
+    Description: >-
+      The From: address to use for email replies.
+    Type: String
+    Default: sevice@example.com
+  SesDomainName:
+    Description: >-
+      The verified Domain you will use with SES
+    Type: String
+    Default: example.com
+  ExistingSesRulesetName:
+    Description: >-
+      Name of an existing SES rule set to use.  If you've never used SES, just leave this empty
+      and we will create one for you.
+    Type: String
+    Default: ''
+
+Conditions:
+  CreateNewSesRuleset: !Equals [!Ref ExistingSesRulesetName, '']
+Resources:
+
+  ImageAnalysisSesReceiverRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    # Only create if ExistingSesRulesetName is empty
+    Condition: CreateNewSesRuleset
+    Properties:
+      RuleSetName: ImageAnalysisSesReceiverRuleSet
+
+  ImageAnalysisSesReceiverRule:
+    Type: AWS::SES::ReceiptRule
+    Properties:
+      # determine whether to use existing or newly created rule set.
+      # https://amzn.to/2NGKRVl
+      RuleSetName: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]
+      Rule:
+        Name: ReceiptRule
+        Recipients:
+          -  !Ref SesDomainName
+        Actions:
+        - S3Action:
+            BucketName: !Ref SesEmailStorageS3Bucket
+        - LambdaAction:
+            FunctionArn: !GetAtt SesReceivedEmailProcessorLambda.Arn
+
+  SesEmailStorageS3Bucket:
+    Type: AWS::S3::Bucket
+    # you will need to manually delete the S3 bucket and its contents in
+    # the console. CF cannot delete non-empty buckets.
+    DeletionPolicy: Retain
+    Description: S3 bucket to hold SES received emails
+  SampleBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: SesEmailStorageS3Bucket
+      PolicyDocument:
+        Statement:
+        - Action:
+          - "s3:PutObject"
+          Effect: "Allow"
+          Resource: !Sub arn:aws:s3:::${SesEmailStorageS3Bucket}/*
+          Principal:
+            Service:
+              ses.amazonaws.com
+          Condition:
+            StringEquals:
+              aws:Referer: !Ref AWS::AccountId
+
+  SesImageToRkogLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-LambdaRole"
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+        -
+          PolicyName: !Sub ${AWS::StackName}-LambdaExecutionPolicies
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+              - ses:SendEmail
+              - rekognition:DetectLabels
+              - rekognition:DetectModerationLabels
+              - rekognition:StartLabelDetection
+              - rekognition:GetLabelDetection
+              Resource: "*"
+            - Effect: Allow
+              Action:
+              - s3:GetObject
+              Resource: !Sub ${SesEmailStorageS3Bucket.Arn}/*
+
+  # define what AWS resources can invoke the SesReceivedEmailProcessorLambda
+  LambdaResourcePolicy:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SesReceivedEmailProcessorLambda
+      Principal: ses.amazonaws.com
+      Action: lambda:InvokeFunction
+
+  SesReceivedEmailProcessorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SesReceivedEmailProcessor
+      Handler: index.lambda_handler
+      Runtime: python3.6
+      Description: >-
+        This is a lambda used in an SES ruleset.  It extracts an image email
+        attachment, sends it to Rekognition for lables, then replys to the
+        sender with those labels
+      MemorySize: 512
+      Timeout: 30
+      Role: !GetAtt SesImageToRkogLambdaRole.Arn
+      Environment:
+        Variables:
+          SES_AWS_REGION: !Ref AWS::Region
+          SES_S3_BUCKET_NAME: !Ref SesEmailStorageS3Bucket
+          SERVICE_FROM_ADDRESS: !Ref SesReplyFromAddress
+      Code:
+        ZipFile: |
+          import boto3
+          from botocore.exceptions import ClientError
+
+          import email
+          import base64
+          import os
+
+          AWS_REGION = os.environ['SES_AWS_REGION']
+          SES_S3_BUCKET_NAME = os.environ['SES_S3_BUCKET_NAME']
+          # This address must be verified with Amazon SES.
+          SERVICE_FROM_ADDRESS = os.environ['SERVICE_FROM_ADDRESS']
+
+          s3 = boto3.client('s3')
+          ses = boto3.client('ses', region_name=AWS_REGION)
+          rekog = boto3.client('rekognition')
+
+
+          def lambda_handler(event, context):
+              # print("Received event: " + json.dumps(event, indent=2))
+              if 'ses' not in event['Records'][0]:
+                  print('this was not an SES event.  event["Records"][0]["ses"] not found')
+                  return
+
+              ses_notification = event['Records'][0]['ses']
+              mail_message_id = ses_notification['mail']['messageId']
+              print(f"Message Id received: {mail_message_id}")
+
+              try:
+                  data = s3.get_object(Bucket=SES_S3_BUCKET_NAME, Key=mail_message_id)
+                  raw_email = data['Body'].read()
+                  parsed_email = email.message_from_string(raw_email.decode('utf-8'))
+                  sender = parsed_email['From']
+
+                  for part in parsed_email.walk():
+                      if is_image_attachment(part):
+                          print('Found an image attachment')
+                          img_bytes = base64.b64decode(part.get_payload())
+                          print('Sending image to Rekognition service')
+                          response = rekog.detect_labels(Image={'Bytes': img_bytes})
+                          print(f'Detected labels for Image:\n{render_labels_as_text(response["Labels"])}')
+                          send_reply(response['Labels'], sender, SERVICE_FROM_ADDRESS)
+              except Exception as e:
+                  print(e)
+                  raise e
+
+
+          def send_reply(labels, target_address, service_from_address):
+              # see https://docs.aws.amazon.com/ses/latest/DeveloperGuide/examples-send-using-sdk.html for details
+              print("SENDING REPLY")
+
+              # The subject line for the email.
+              email_subject = "Your analyzed Image"
+
+              # The email body for recipients with non-HTML email clients.
+              body_text = ("Amazon SES Test (Python)\r\n"
+                          "This email was sent with Amazon SES using the "
+                          "AWS SDK for Python (Boto)."
+                          )
+              body_text += render_labels_as_text(labels)
+              body_html = render_html(labels)
+              charset = "UTF-8"
+
+              try:
+                  response = ses.send_email(
+                      Destination={
+                          'ToAddresses': [
+                              target_address,
+                          ],
+                      },
+                      Message={
+                          'Body': {
+                              'Html': {
+                                  'Charset': charset,
+                                  'Data': body_html,
+                              },
+                              'Text': {
+                                  'Charset': charset,
+                                  'Data': body_text,
+                              },
+                          },
+                          'Subject': {
+                              'Charset': charset,
+                              'Data': email_subject,
+                          },
+                      },
+                      Source=service_from_address,
+                  )
+              except ClientError as e:
+                  print("ERROR: ", e.response['Error']['Message'])
+              else:
+                  print(f"Email sent! Message ID: {response['MessageId']}"),
+
+
+          def is_image_attachment(email_section):
+              # print(f"Part: {part}")
+              c_type = email_section.get_content_type()
+              # c_disp = part.get('Content-Disposition')
+              # print(f"c_type: {c_type}, c_disp: {c_disp}")
+              return c_type in ["image/png", "image/jpeg"]
+
+
+          def render_labels_as_text(labels):
+              return '\n'.join([f'{elem["Name"]}: {elem["Confidence"]}' for elem in labels])
+
+
+          def render_html(labels):
+              lables_list = render_labels_as_text(labels)
+              return f'''<html>
+              <head></head>
+              <body>
+              <h1>Your Results</h1>
+              <pre>{lables_list}<pre>
+              <hr/>
+              <p>This email was sent with <a href='https://aws.amazon.com/ses/'>Amazon SES</a> using the
+              <a href='https://aws.amazon.com/sdk-for-python/'>AWS SDK for Python (Boto)</a>.</p>
+              </body>
+              </html>'''
+
+Outputs:
+
+  FinishUpStep1:
+    Description: 'Step 1: Enable SES Rule'
+    Value: !Sub
+      - Go here to enable this the SES Rule; https://${region}.console.aws.amazon.com/ses/home?region=${region}#edit-rule:${ruleset}:${rule}
+      - {region: !Ref 'AWS::Region', rule: !Ref ImageAnalysisSesReceiverRule, ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]}
+
+  FinishUpStep2:
+    Description: 'Step 2: Activate SES Rule Set'
+    Value: !Sub
+    - "Go to Rule Set Homepage, check the Rule Set we just created [${ruleset}], then click the 'Set as Active Rule Set' Button https://${region}.console.aws.amazon.com/ses/home?region=${region}#receipt-rules:_"
+    - {region: !Ref 'AWS::Region', ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]}
+
+  FinishUpStep3:
+    Description: 'Step 3: Verify SES Rule Set & Rule active/enabled'
+    Value: !Sub
+    - "You should now see your Active Rule Set [${ruleset}] with enabled Rule [${rule}], https://${region}.console.aws.amazon.com/ses/home?region=${region}#rule-set:${ruleset}"
+    - {region: !Ref 'AWS::Region', rule: !Ref ImageAnalysisSesReceiverRule, ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]}
+
+  FinishUpStep4Last:
+    Description: 'Step 4 (final): Verify your testing email addresses'
+    Value: !Sub
+    - "If your SES is sandboxed (true if just created), you'll need to verify any addressed SES will be replying to, https://${region}.console.aws.amazon.com/ses/home?region=${region}#verified-senders-email:_"
+    - {region: !Ref 'AWS::Region'}
+
+  TheLambdaLogs:
+    Description: 'Here are the Logs for the Lambda function '
+    Value: !Sub
+    - "disregard the 'not found...' error, only shown as the logs are initially empty https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}#logEventViewer:group=/aws/lambda/${lambda}"
+    - {region: !Ref 'AWS::Region', lambda: !Ref SesReceivedEmailProcessorLambda}
+
+  TheLambdaFunction:
+    Description: 'Link to the Lambda function'
+    Value: !Sub
+    - "The Lambda SES uses to send the img to Rekognition https://${region}.console.aws.amazon.com/lambda/home?region=${region}#/functions/${lambda}?tab=graph"
+    - {region: !Ref 'AWS::Region', lambda: !Ref SesReceivedEmailProcessorLambda}
+
