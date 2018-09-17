@@ -10,7 +10,7 @@ Parameters:
       The verified Domain you will use with SES
     Type: String
     Default: example.com
-  ExistingSesRulesetName:
+  ExistingSesRuleSetName:
     Description: >-
       Name of an existing SES rule set to use.  If you've never used SES, just leave this empty
       and we will create one for you.
@@ -18,12 +18,12 @@ Parameters:
     Default: ''
 
 Conditions:
-  CreateNewSesRuleset: !Equals [!Ref ExistingSesRulesetName, '']
+  CreateNewSesRuleset: !Equals [!Ref ExistingSesRuleSetName, '']
 Resources:
 
   ImageAnalysisSesReceiverRuleSet:
     Type: AWS::SES::ReceiptRuleSet
-    # Only create if ExistingSesRulesetName is empty
+    # Only create if ExistingSesRuleSetName is empty
     Condition: CreateNewSesRuleset
     Properties:
       RuleSetName: ImageAnalysisSesReceiverRuleSet
@@ -33,7 +33,7 @@ Resources:
     Properties:
       # determine whether to use existing or newly created rule set.
       # https://amzn.to/2NGKRVl
-      RuleSetName: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]
+      RuleSetName: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRuleSetName]
       Rule:
         Name: ReceiptRule
         Recipients:
@@ -248,21 +248,17 @@ Resources:
 
 Outputs:
 
-  FinishUpStep1:
+  FinishUpStepSesRuleEnable:
     Description: 'Step 1: Enable SES Rule'
     Value: !Sub
       - Go here to enable this the SES Rule; https://${region}.console.aws.amazon.com/ses/home?region=${region}#edit-rule:${ruleset}:${rule}
-      - {region: !Ref 'AWS::Region', rule: !Ref ImageAnalysisSesReceiverRule, ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]}
+      - {region: !Ref 'AWS::Region', rule: !Ref ImageAnalysisSesReceiverRule, ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRuleSetName]}
 
-  FinishUpStep2:
+  FinishUpStepSesRuleSetActivate:
     Description: 'Step 2: Activate SES Rule Set'
     Value: !Sub
     - "Go to Rule Set Homepage, check the Rule Set we just created [${ruleset}], then click the 'Set as Active Rule Set' Button https://console.aws.amazon.com/ses/home#receipt-rules:_"
-    - {ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRulesetName]}
-
-  FinishUpStep3Last:
-    Description: 'Step 3 (final): Verify your testing email addresses'
-    Value: If your SES is sandboxed (true if just created), you'll need to verify any addressed SES will be replying to, https://console.aws.amazon.com/ses/home#verified-senders-email:_
+    - {ruleset: !If [CreateNewSesRuleset, !Ref ImageAnalysisSesReceiverRuleSet, !Ref ExistingSesRuleSetName]}
 
   TheLambdaLogs:
     Description: 'Here are the Logs for the Lambda function '
@@ -275,4 +271,11 @@ Outputs:
     Value: !Sub
     - "The Lambda SES uses to send the img to Rekognition https://console.aws.amazon.com/lambda/home#/functions/${lambda}?tab=graph"
     - {lambda: !Ref SesReceivedEmailProcessorLambda}
+
+  TheS3Bucket:
+    Description: 'The S3 Bucket created for this service'
+    Value: !Sub
+    - "${s3} (note: Upon deletion of this CloudFormation stack, this S3 bucket will NOT be deleted. You will need to delete it manually)"
+    - {s3: !Ref SesEmailStorageS3Bucket}
+
 
